@@ -1,0 +1,95 @@
+name: dao-factory
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "Number of accounts to create (parallel)"
+        required: false
+        default: "5"
+        type: string
+
+jobs:
+  signup:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - name: Skip if beyond requested count
+        id: skip
+        run: |
+          if [ ${{ matrix.idx }} -gt ${{ inputs.count }} ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout
+        if: steps.skip.outputs.skip == 'false'
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        if: steps.skip.outputs.skip == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        if: steps.skip.outputs.skip == 'false'
+        run: |
+          npm init -y
+          npm install playwright@1.48.0
+          npx playwright install chromium --with-deps
+
+      - name: Run signup
+        if: steps.skip.outputs.skip == 'false'
+        env:
+          RUN_ID: "actions-${{ github.run_id }}-${{ matrix.idx }}"
+          HEADLESS: "true"
+        run: node dao_actions_signup.js
+        timeout-minutes: 8
+
+      - name: Upload account
+        if: always() && steps.skip.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: account-${{ matrix.idx }}-${{ github.run_id }}
+          path: output/
+          retention-days: 7
+
+  collect:
+    needs: signup
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_accounts/
+
+      - name: Aggregate
+        run: |
+          mkdir -p collected
+          find all_accounts -name "account_*.json" -exec cp {} collected/ \;
+          ls -la collected/
+          echo "=== Successful accounts ==="
+          for f in collected/account_*.json; do
+            [ -f "$f" ] || continue
+            python3 -c "
+import json
+d = json.load(open('$f'))
+if d.get('ok'):
+  print(f\"  ✓ {d['user']} / {d['email']} / pat={'yes' if d.get('pat') else 'no'}\")
+else:
+  print(f\"  ✗ {d['user']} - {d.get('error','?')}\")"
+          done
+
+      - name: Upload aggregated
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-accounts-${{ github.run_id }}
+          path: collected/
+          retention-days: 30
